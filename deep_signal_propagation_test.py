@@ -22,8 +22,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import warnings
 warnings.filterwarnings('ignore')
+
+# Multi-GPU 설정
+NUM_GPUS = torch.cuda.device_count()
+print(f"Available GPUs: {NUM_GPUS}")
+for i in range(NUM_GPUS):
+    print(f"  cuda:{i} - {torch.cuda.get_device_name(i)}")
 
 # mHC 라이브러리 임포트 시도
 try:
@@ -458,24 +466,77 @@ def train_model(
 # 7. Experiment Runner
 # =============================================================================
 
+def run_single_depth_experiment(
+    depth: int,
+    config: ExperimentConfig,
+    device: str,
+    dataset: SyntheticDataset
+) -> Dict[str, MetricsTracker]:
+    """단일 깊이에서 모든 모델 학습 (특정 GPU에서)"""
+    # 이 깊이 전용 config 생성 (device 지정)
+    depth_config = ExperimentConfig(
+        input_dim=config.input_dim,
+        hidden_dim=config.hidden_dim,
+        expansion_rate=config.expansion_rate,
+        batch_size=config.batch_size,
+        num_samples=config.num_samples,
+        learning_rate=config.learning_rate,
+        num_epochs=config.num_epochs,
+        sinkhorn_iters=config.sinkhorn_iters,
+        device=device,
+        seed=config.seed
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        dataset, batch_size=config.batch_size, shuffle=True
+    )
+
+    results = {}
+
+    print(f"\n[{device}] {'='*60}")
+    print(f"[{device}] DEPTH = {depth} layers")
+    print(f"[{device}] {'='*60}")
+
+    # 1. Baseline ResNet
+    torch.manual_seed(config.seed)
+    baseline = BaselineResNet(depth_config, depth)
+    results["Baseline"] = train_model(
+        baseline, train_loader, depth_config, f"Baseline (D={depth}) [{device}]"
+    )
+
+    # 2. HC (Unconstrained)
+    torch.manual_seed(config.seed)
+    hc = HCModel(depth_config, depth)
+    results["HC"] = train_model(
+        hc, train_loader, depth_config, f"HC (D={depth}) [{device}]"
+    )
+
+    # 3. mHC (Constrained)
+    torch.manual_seed(config.seed)
+    mhc = mHCModelPyTorch(depth_config, depth)
+    results["mHC"] = train_model(
+        mhc, train_loader, depth_config, f"mHC (D={depth}) [{device}]"
+    )
+
+    return results
+
+
 def run_depth_scaling_experiment(
     depths: List[int],
     config: ExperimentConfig
 ) -> Dict[str, Dict[int, MetricsTracker]]:
     """
-    깊이 스케일링 실험
+    깊이 스케일링 실험 - Multi-GPU 병렬화
     """
     print("\n" + "="*80)
-    print("DEPTH SCALING EXPERIMENT")
+    print("DEPTH SCALING EXPERIMENT (Multi-GPU Parallel)")
     print("="*80)
     print(f"Testing depths: {depths}")
     print(f"Expansion rate (n): {config.expansion_rate}")
-    print(f"Device: {config.device}")
+    print(f"Available GPUs: {NUM_GPUS}")
 
+    # 데이터셋 생성 (공유)
     dataset = SyntheticDataset(config.num_samples, config.input_dim, config.seed)
-    train_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=config.batch_size, shuffle=True
-    )
 
     results = {
         "Baseline": {},
@@ -483,31 +544,42 @@ def run_depth_scaling_experiment(
         "mHC": {}
     }
 
-    for depth in depths:
-        print(f"\n{'='*80}")
-        print(f"DEPTH = {depth} layers")
-        print(f"{'='*80}")
+    if NUM_GPUS >= 2:
+        # Multi-GPU: 깊이별로 GPU 분배
+        print(f"Using {NUM_GPUS} GPUs for parallel execution")
 
-        # 1. Baseline ResNet
-        torch.manual_seed(config.seed)
-        baseline = BaselineResNet(config, depth)
-        results["Baseline"][depth] = train_model(
-            baseline, train_loader, config, f"Baseline (D={depth})"
-        )
+        with ThreadPoolExecutor(max_workers=NUM_GPUS) as executor:
+            futures = {}
+            for i, depth in enumerate(depths):
+                device = f"cuda:{i % NUM_GPUS}"
+                future = executor.submit(
+                    run_single_depth_experiment,
+                    depth, config, device, dataset
+                )
+                futures[future] = depth
 
-        # 2. HC (Unconstrained)
-        torch.manual_seed(config.seed)
-        hc = HCModel(config, depth)
-        results["HC"][depth] = train_model(
-            hc, train_loader, config, f"HC Unconstrained (D={depth})"
-        )
-
-        # 3. mHC (Constrained)
-        torch.manual_seed(config.seed)
-        mhc = mHCModelPyTorch(config, depth)  # PyTorch 버전 사용
-        results["mHC"][depth] = train_model(
-            mhc, train_loader, config, f"mHC Constrained (D={depth})"
-        )
+            for future in as_completed(futures):
+                depth = futures[future]
+                try:
+                    depth_results = future.result()
+                    for model_name in ["Baseline", "HC", "mHC"]:
+                        results[model_name][depth] = depth_results[model_name]
+                    print(f"\n✓ Depth {depth} completed!")
+                except Exception as e:
+                    print(f"\n✗ Depth {depth} failed: {e}")
+                    for model_name in ["Baseline", "HC", "mHC"]:
+                        tracker = MetricsTracker()
+                        tracker.update(float('nan'), float('nan'), float('nan'))
+                        results[model_name][depth] = tracker
+    else:
+        # Single GPU: 순차 실행
+        print("Single GPU mode - sequential execution")
+        for depth in depths:
+            depth_results = run_single_depth_experiment(
+                depth, config, config.device, dataset
+            )
+            for model_name in ["Baseline", "HC", "mHC"]:
+                results[model_name][depth] = depth_results[model_name]
 
     return results
 
