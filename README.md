@@ -59,12 +59,6 @@ Where:
 | Output dimension | 128 |
 | Batch size | 64 |
 
-### Visualization
-
-The dataset can be visualized using PCA projection:
-- **Input X**: Isotropic Gaussian distribution in high-dimensional space
-- **Output Y**: Compressed distribution due to `tanh` nonlinearity (bounded to [-1, 1])
-
 ## Installation
 
 ```bash
