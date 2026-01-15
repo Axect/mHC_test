@@ -3,16 +3,15 @@ Deep Signal Propagation Stress Test
 ====================================
 HC (Hyper-Connections) vs mHC (Manifold-Constrained Hyper-Connections)
 
-이 실험은 깊은 네트워크에서 신호 전파의 안정성을 테스트합니다.
+This experiment tests signal propagation stability in deep networks.
 - Baseline: Standard ResNet (y = x + F(x))
-- HC: Unconstrained Hyper-Connections (Sinkhorn-Knopp 제약 없음)
-- mHC: Manifold-Constrained HC (mHC.cu 라이브러리 사용)
+- HC: Unconstrained Hyper-Connections (no Sinkhorn-Knopp constraint)
+- mHC: Manifold-Constrained HC (uses mHC.cu library)
 """
 
 import sys
 import os
 
-# mHC 라이브러리 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'mHC.cu', 'src', 'python'))
 
 import torch
@@ -27,13 +26,11 @@ import threading
 import warnings
 warnings.filterwarnings('ignore')
 
-# Multi-GPU 설정
 NUM_GPUS = torch.cuda.device_count()
 print(f"Available GPUs: {NUM_GPUS}")
 for i in range(NUM_GPUS):
     print(f"  cuda:{i} - {torch.cuda.get_device_name(i)}")
 
-# mHC 라이브러리 임포트 시도
 try:
     from mhc import MHCLayer, sinkhorn_knopp
     MHC_AVAILABLE = True
@@ -50,15 +47,15 @@ except ImportError as e:
 
 @dataclass
 class ExperimentConfig:
-    """실험 설정"""
-    input_dim: int = 128          # 입력 차원
-    hidden_dim: int = 128         # 히든 레이어 차원
-    expansion_rate: int = 4       # Residual Stream 확장 비율 (n) - 논문 기본값
+    """Experiment configuration"""
+    input_dim: int = 128
+    hidden_dim: int = 128
+    expansion_rate: int = 4
     batch_size: int = 64
-    num_samples: int = 5000       # 학습 데이터 수
+    num_samples: int = 5000
     learning_rate: float = 1e-4
     num_epochs: int = 100
-    sinkhorn_iters: int = 20      # Sinkhorn-Knopp 반복 횟수
+    sinkhorn_iters: int = 20
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 42
 
@@ -69,8 +66,8 @@ class ExperimentConfig:
 
 class SyntheticDataset(torch.utils.data.Dataset):
     """
-    합성 데이터셋: x -> tanh(Wx + b)
-    깊은 네트워크가 학습할 수 있는 비선형 변환
+    Synthetic dataset: x -> tanh(Wx + b)
+    A nonlinear transformation for deep networks to learn.
     """
     def __init__(self, num_samples: int, input_dim: int, seed: int = 42):
         torch.manual_seed(seed)
@@ -94,8 +91,8 @@ class SyntheticDataset(torch.utils.data.Dataset):
 
 def sinkhorn_knopp_pytorch(matrix: torch.Tensor, num_iterations: int = 20, eps: float = 1e-5) -> torch.Tensor:
     """
-    Sinkhorn-Knopp 알고리즘의 PyTorch 구현 (CUDA 라이브러리 대체용)
-    행렬을 이중 확률 행렬(Doubly Stochastic Matrix)로 변환
+    PyTorch implementation of Sinkhorn-Knopp algorithm.
+    Transforms a matrix into a doubly stochastic matrix.
     """
     M = torch.exp(matrix)
     for _ in range(num_iterations):
@@ -109,7 +106,7 @@ def sinkhorn_knopp_pytorch(matrix: torch.Tensor, num_iterations: int = 20, eps: 
 # =============================================================================
 
 class ResidualBlock(nn.Module):
-    """기본 Residual Block: F(x) 계산"""
+    """Basic Residual Block: computes F(x)"""
     def __init__(self, dim: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -150,8 +147,8 @@ class HCModel(nn.Module):
     """
     HC (Hyper-Connections) - Unconstrained
 
-    H^res 행렬에 제약이 없어서 깊어질수록 신호가 폭발할 수 있음.
-    이것이 mHC가 필요한 이유!
+    Without constraints on H^res, signals can explode in deeper networks.
+    This demonstrates why mHC is necessary.
     """
     def __init__(self, config: ExperimentConfig, num_layers: int):
         super().__init__()
@@ -165,20 +162,19 @@ class HCModel(nn.Module):
             ResidualBlock(config.hidden_dim) for _ in range(num_layers)
         ])
 
-        # H^res: (n x n) 행렬, 제약 없이 학습
-        # Identity에서 시작하되 약간의 노이즈 추가
+        # H^res: (n x n) matrix, learned without constraints
         self.H_res = nn.ParameterList([
             nn.Parameter(torch.eye(self.n) + 0.01 * torch.randn(self.n, self.n))
             for _ in range(num_layers)
         ])
 
-        # H^pre: 어떤 스트림에서 F(x) 입력을 가져올지 (n,)
+        # H^pre: selects which streams contribute to F(x) input (n,)
         self.H_pre = nn.ParameterList([
             nn.Parameter(torch.ones(self.n) / self.n)
             for _ in range(num_layers)
         ])
 
-        # H^post: F(x) 출력을 어떤 스트림에 분배할지 (n,)
+        # H^post: distributes F(x) output to streams (n,)
         self.H_post = nn.ParameterList([
             nn.Parameter(torch.ones(self.n) / self.n)
             for _ in range(num_layers)
@@ -189,32 +185,24 @@ class HCModel(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
 
-        # 입력을 n개 스트림으로 확장
-        h = self.input_proj(x)  # (B, n*C)
-        h = h.reshape(B, self.n, self.hidden_dim)  # (B, n, C)
+        h = self.input_proj(x)
+        h = h.reshape(B, self.n, self.hidden_dim)
 
         for i, block in enumerate(self.blocks):
-            H_res = self.H_res[i]    # (n, n)
-            H_pre = torch.sigmoid(self.H_pre[i])   # (n,)
-            H_post = 2.0 * torch.sigmoid(self.H_post[i])  # (n,) - 논문의 스케일링
+            H_res = self.H_res[i]
+            H_pre = torch.sigmoid(self.H_pre[i])
+            H_post = 2.0 * torch.sigmoid(self.H_post[i])
 
-            # 1. H^pre로 스트림 집계하여 F(x) 입력 생성
-            block_input = torch.einsum('k,bkc->bc', H_pre, h)  # (B, C)
-
-            # 2. F(x) 계산
-            block_output = block(block_input)  # (B, C)
-
-            # 3. H^res로 residual stream 변환 (제약 없음!)
-            h_mixed = torch.einsum('ij,bjc->bic', H_res, h)  # (B, n, C)
-
-            # 4. H^post로 F(x) 출력 분배
+            block_input = torch.einsum('k,bkc->bc', H_pre, h)
+            block_output = block(block_input)
+            h_mixed = torch.einsum('ij,bjc->bic', H_res, h)
             h = h_mixed + torch.einsum('k,bc->bkc', H_post, block_output)
 
         h = h.reshape(B, self.n * self.hidden_dim)
         return self.output_proj(h)
 
     def get_cumulative_H_res(self) -> torch.Tensor:
-        """누적 H^res 행렬 계산"""
+        """Compute cumulative H^res matrix"""
         result = torch.eye(self.n, device=self.H_res[0].device)
         for H in self.H_res:
             result = result @ H
@@ -223,10 +211,10 @@ class HCModel(nn.Module):
 
 class mHCModelPyTorch(nn.Module):
     """
-    mHC (Manifold-Constrained HC) - PyTorch Fallback 구현
+    mHC (Manifold-Constrained HC) - PyTorch Fallback
 
-    H^res를 Sinkhorn-Knopp으로 이중 확률 행렬로 제약하여
-    신호 크기를 보존함.
+    Constrains H^res to be doubly stochastic via Sinkhorn-Knopp,
+    preserving signal magnitude through layers.
     """
     def __init__(self, config: ExperimentConfig, num_layers: int):
         super().__init__()
@@ -241,7 +229,7 @@ class mHCModelPyTorch(nn.Module):
             ResidualBlock(config.hidden_dim) for _ in range(num_layers)
         ])
 
-        # H^res의 로그값을 학습 (Sinkhorn-Knopp 적용 전)
+        # Logits for H^res (before Sinkhorn-Knopp)
         self.H_res_logits = nn.ParameterList([
             nn.Parameter(torch.zeros(self.n, self.n))
             for _ in range(num_layers)
@@ -260,7 +248,7 @@ class mHCModelPyTorch(nn.Module):
         self.num_layers = num_layers
 
     def get_constrained_H_res(self, idx: int) -> torch.Tensor:
-        """Sinkhorn-Knopp으로 제약된 H^res 반환"""
+        """Return H^res constrained by Sinkhorn-Knopp"""
         return sinkhorn_knopp_pytorch(self.H_res_logits[idx], self.sinkhorn_iters)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -270,15 +258,12 @@ class mHCModelPyTorch(nn.Module):
         h = h.reshape(B, self.n, self.hidden_dim)
 
         for i, block in enumerate(self.blocks):
-            # 핵심: Sinkhorn-Knopp으로 H^res를 이중 확률 행렬로 제약!
             H_res = self.get_constrained_H_res(i)
             H_pre = torch.sigmoid(self.H_pre[i])
             H_post = 2.0 * torch.sigmoid(self.H_post[i])
 
             block_input = torch.einsum('k,bkc->bc', H_pre, h)
             block_output = block(block_input)
-
-            # 이중 확률 행렬로 변환된 H_res 사용
             h_mixed = torch.einsum('ij,bjc->bic', H_res, h)
             h = h_mixed + torch.einsum('k,bc->bkc', H_post, block_output)
 
@@ -286,7 +271,7 @@ class mHCModelPyTorch(nn.Module):
         return self.output_proj(h)
 
     def get_cumulative_H_res(self) -> torch.Tensor:
-        """누적 H^res 행렬 계산"""
+        """Compute cumulative H^res matrix"""
         result = torch.eye(self.n, device=self.H_res_logits[0].device)
         for i in range(len(self.H_res_logits)):
             H_res = self.get_constrained_H_res(i)
@@ -296,9 +281,9 @@ class mHCModelPyTorch(nn.Module):
 
 class mHCModelCUDA(nn.Module):
     """
-    mHC (Manifold-Constrained HC) - mHC.cu CUDA 라이브러리 사용
+    mHC (Manifold-Constrained HC) - Using mHC.cu CUDA library
 
-    CUDA 최적화된 Sinkhorn-Knopp과 fused 연산 사용
+    Uses CUDA-optimized Sinkhorn-Knopp and fused operations.
     """
     def __init__(self, config: ExperimentConfig, num_layers: int):
         super().__init__()
@@ -308,13 +293,12 @@ class mHCModelCUDA(nn.Module):
         self.input_proj = nn.Linear(config.input_dim, config.hidden_dim * self.n)
         self.output_proj = nn.Linear(config.hidden_dim * self.n, config.input_dim)
 
-        # MHCLayer를 각 레이어마다 사용
         self.mhc_layers = nn.ModuleList([
             MHCLayer(
                 hidden_dim=config.hidden_dim,
                 expansion_rate=config.expansion_rate,
                 sinkhorn_iters=config.sinkhorn_iters,
-                use_dynamic_h=False,  # Static H 사용
+                use_dynamic_h=False,
             )
             for _ in range(num_layers)
         ])
@@ -332,25 +316,15 @@ class mHCModelCUDA(nn.Module):
         h = h.reshape(B, self.n, self.hidden_dim)
 
         for i, (mhc_layer, block) in enumerate(zip(self.mhc_layers, self.blocks)):
-            # MHCLayer는 (B, n, C) 형태를 기대
-            # 내부에서 H^pre로 집계, RMSNorm, H^post로 분배, H^res로 믹싱을 모두 처리
-            # 여기서는 간단히 block만 적용하고 mhc_layer로 출력 처리
-
-            # 스트림 집계
             h_pre = torch.sigmoid(mhc_layer.H_pre) if hasattr(mhc_layer, 'H_pre') else torch.ones(self.n, device=h.device) / self.n
-            block_input = h.mean(dim=1)  # 간단한 집계
-
-            # F(x) 계산
+            block_input = h.mean(dim=1)
             block_output = block(block_input)
-
-            # mHC layer로 출력 처리 (Sinkhorn-Knopp 제약 적용됨)
             h = mhc_layer(h)
 
         h = h.reshape(B, self.n * self.hidden_dim)
         return self.output_proj(h)
 
 
-# 사용할 mHC 모델 선택
 if MHC_AVAILABLE:
     mHCModel = mHCModelCUDA
 else:
@@ -362,7 +336,7 @@ else:
 # =============================================================================
 
 class MetricsTracker:
-    """학습 과정의 지표들을 추적"""
+    """Tracks training metrics"""
     def __init__(self):
         self.losses: List[float] = []
         self.gradient_norms: List[float] = []
@@ -375,7 +349,7 @@ class MetricsTracker:
 
 
 def compute_gradient_norm(model: nn.Module) -> float:
-    """모델의 전체 gradient norm 계산"""
+    """Compute total gradient norm of the model"""
     total_norm = 0.0
     for p in model.parameters():
         if p.grad is not None:
@@ -385,10 +359,10 @@ def compute_gradient_norm(model: nn.Module) -> float:
 
 def compute_amax_gain(model: nn.Module) -> float:
     """
-    Amax Gain: 누적 H^res 행렬의 행/열 합 최댓값
+    Amax Gain: max row/column sum of cumulative H^res matrix.
 
-    - 이상적인 경우 (mHC): ≈ 1.0 (이중 확률 행렬이므로)
-    - 불안정한 경우 (HC): >> 1.0 (신호 폭발)
+    - Ideal case (mHC): ~1.0 (doubly stochastic)
+    - Unstable case (HC): >> 1.0 (signal explosion)
     """
     if hasattr(model, 'get_cumulative_H_res'):
         with torch.no_grad():
@@ -410,7 +384,7 @@ def train_model(
     config: ExperimentConfig,
     model_name: str
 ) -> MetricsTracker:
-    """단일 모델 학습"""
+    """Train a single model"""
     model = model.to(config.device)
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
     criterion = nn.MSELoss()
@@ -472,8 +446,7 @@ def run_single_depth_experiment(
     device: str,
     dataset: SyntheticDataset
 ) -> Dict[str, MetricsTracker]:
-    """단일 깊이에서 모든 모델 학습 (특정 GPU에서)"""
-    # 이 깊이 전용 config 생성 (device 지정)
+    """Run all models at a single depth on a specific GPU"""
     depth_config = ExperimentConfig(
         input_dim=config.input_dim,
         hidden_dim=config.hidden_dim,
@@ -525,9 +498,7 @@ def run_depth_scaling_experiment(
     depths: List[int],
     config: ExperimentConfig
 ) -> Dict[str, Dict[int, MetricsTracker]]:
-    """
-    깊이 스케일링 실험 - Multi-GPU 병렬화
-    """
+    """Depth scaling experiment with Multi-GPU parallelization"""
     print("\n" + "="*80)
     print("DEPTH SCALING EXPERIMENT (Multi-GPU Parallel)")
     print("="*80)
@@ -535,7 +506,6 @@ def run_depth_scaling_experiment(
     print(f"Expansion rate (n): {config.expansion_rate}")
     print(f"Available GPUs: {NUM_GPUS}")
 
-    # 데이터셋 생성 (공유)
     dataset = SyntheticDataset(config.num_samples, config.input_dim, config.seed)
 
     results = {
@@ -545,7 +515,6 @@ def run_depth_scaling_experiment(
     }
 
     if NUM_GPUS >= 2:
-        # Multi-GPU: 깊이별로 GPU 분배
         print(f"Using {NUM_GPUS} GPUs for parallel execution")
 
         with ThreadPoolExecutor(max_workers=NUM_GPUS) as executor:
@@ -572,7 +541,6 @@ def run_depth_scaling_experiment(
                         tracker.update(float('nan'), float('nan'), float('nan'))
                         results[model_name][depth] = tracker
     else:
-        # Single GPU: 순차 실행
         print("Single GPU mode - sequential execution")
         for depth in depths:
             depth_results = run_single_depth_experiment(
@@ -589,7 +557,7 @@ def run_depth_scaling_experiment(
 # =============================================================================
 
 def plot_results(results: Dict[str, Dict[int, MetricsTracker]], save_path: str = None):
-    """실험 결과 시각화"""
+    """Visualize experiment results"""
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle("Deep Signal Propagation Stress Test: HC vs mHC", fontsize=14, fontweight='bold')
 
@@ -616,7 +584,7 @@ def plot_results(results: Dict[str, Dict[int, MetricsTracker]], save_path: str =
     ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
 
-    # 2. Amax Gain by Depth (핵심 지표!)
+    # 2. Amax Gain by Depth (Key metric)
     ax = axes[0, 1]
     for model_name in ["HC", "mHC"]:
         amax_gains = []
@@ -674,7 +642,7 @@ def plot_results(results: Dict[str, Dict[int, MetricsTracker]], save_path: str =
 
 
 def print_summary(results: Dict[str, Dict[int, MetricsTracker]]):
-    """실험 결과 요약 출력"""
+    """Print experiment summary"""
     print("\n" + "="*80)
     print("EXPERIMENT SUMMARY")
     print("="*80)
@@ -711,7 +679,7 @@ def print_summary(results: Dict[str, Dict[int, MetricsTracker]]):
 # =============================================================================
 
 def main():
-    """메인 실험 실행"""
+    """Main experiment execution"""
     print("="*80)
     print("Deep Signal Propagation Stress Test")
     print("HC (Hyper-Connections) vs mHC (Manifold-Constrained HC)")
@@ -728,7 +696,6 @@ def main():
     print(f"  - Device: {config.device}")
     print(f"  - mHC CUDA Available: {MHC_AVAILABLE}")
 
-    # 깊이 스케일링 실험
     depths = [10, 30, 50, 100]
 
     results = run_depth_scaling_experiment(depths, config)
@@ -743,20 +710,21 @@ def main():
     print("CONCLUSION")
     print("="*80)
     print("""
-    예상 결론:
+    Expected conclusions:
 
-    1. Amax Gain (핵심 지표):
-       - HC: 깊이가 증가함에 따라 Amax >> 1.0 (신호 폭발)
-       - mHC: 깊이와 관계없이 Amax ≈ 1.0 유지 (이중 확률 행렬 제약)
+    1. Amax Gain (Key metric):
+       - HC: Amax >> 1.0 as depth increases (signal explosion)
+       - mHC: Amax ~ 1.0 regardless of depth (doubly stochastic constraint)
 
-    2. 학습 안정성:
-       - HC: 깊은 네트워크에서 Loss 발산 또는 NaN 발생 가능
-       - mHC: 안정적인 학습 곡선 유지
+    2. Training stability:
+       - HC: Loss divergence or NaN possible in deep networks
+       - mHC: Maintains stable training curves
 
-    3. 핵심 차이:
-       - HC의 누적 H^res: ∏H^res가 Identity에서 벗어남
-       - mHC의 누적 H^res: 이중 확률 행렬의 곱도 이중 확률 행렬
-                          → 행/열 합이 항상 1로 유지됨
+    3. Key difference:
+       - HC cumulative H^res: Product of H^res deviates from identity
+       - mHC cumulative H^res: Product of doubly stochastic matrices
+                               remains doubly stochastic
+                               -> Row/column sums always equal 1
     """)
 
 
