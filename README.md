@@ -1,17 +1,19 @@
 # mHC Deep Signal Propagation Test
 
-A stress test comparing signal propagation stability in deep neural networks between **HC (Hyper-Connections)** and **mHC (Manifold-Constrained Hyper-Connections)**.
+A stress test comparing signal propagation stability in deep neural networks between **HC (Hyper-Connections without manifold constraint)** and **mHC (Manifold-Constrained Hyper-Connections)**.
 
 ## Overview
 
 This experiment demonstrates why the doubly stochastic matrix constraint (via Sinkhorn-Knopp algorithm) in mHC is crucial for training very deep networks.
+
+> **Important Note**: The "HC" implementation in this repository is based on the [mHC paper](https://arxiv.org/abs/2512.24880) architecture **without the manifold (doubly stochastic) constraint**. It is NOT the original Hyper-Connections from a separate work, but rather the mHC framework with the Sinkhorn-Knopp normalization disabled. This allows for a fair comparison of the effect of the doubly stochastic constraint within the same architectural framework.
 
 ### Key Findings
 
 | Model | Cumulative H^res Behavior | Deep Network Stability |
 |-------|---------------------------|------------------------|
 | **Baseline ResNet** | N/A (standard residual) | Moderate |
-| **HC (Unconstrained)** | Amax >> 1.0 (signal explosion) | Unstable |
+| **HC (mHC w/o constraint)** | Amax >> 1.0 (signal explosion) | Unstable |
 | **mHC (Constrained)** | Amax ≈ 1.0 (signal preserved) | Stable |
 
 ## What is mHC?
@@ -25,11 +27,9 @@ mHC constrains the residual mixing matrix H^res to be a **doubly stochastic matr
 ## Installation
 
 ```bash
-# Using uv (recommended)
-uv sync
-
-# Or using pip
-pip install torch numpy matplotlib
+uv pip install torch numpy matplotlib
+git clone https://github.com/AndreSlavescu/mHC.cu
+uv pip install -e ./mHC.cu/ --no-build-isolation
 ```
 
 ## Usage
@@ -64,8 +64,8 @@ This will:
 
 ## References
 
-- Hyper-Connections paper (HC)
-- mHC.cu CUDA library for optimized Sinkhorn-Knopp operations
+- [mHC: Manifold-Constrained Hyper-Connections (arXiv:2512.24880)](https://arxiv.org/abs/2512.24880)
+- [mHC.cu - CUDA library for optimized Sinkhorn-Knopp operations](https://github.com/AndreSlavescu/mHC.cu)
 
 ## License
 
